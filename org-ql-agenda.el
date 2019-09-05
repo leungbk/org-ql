@@ -254,11 +254,37 @@ TITLE: An optional string displayed in the header."
     :title title
     :buffer "*Org QL Search*"))
 
-(defun org-ql-search-refresh ()
-  "Refresh current `org-ql-search' buffer."
-  (interactive)
+(defun org-ql-search-refresh (change)
+  "Refresh current `org-ql-search' buffer.
+If CHANGE is non-nil (interactively, with prefix), change the
+search parameters."
+  (interactive "P")
   (let ((current-line (buffer-substring-no-properties (line-beginning-position) (line-end-position)))
         (old-pos (point)))
+    (when change
+      (setf org-ql-buffers-files (completing-read "Buffers/Files: "
+                                                  (list 'buffer 'agenda 'all)
+                                                  nil nil org-ql-buffers-files)
+            org-ql-query (read-minibuffer "Query: " (prin1-to-string org-ql-query))
+            org-ql-super-groups (pcase (completing-read "Group by: "
+                                                        (append (list "Don't group"
+                                                                      "Global groups")
+                                                                (cl-loop for type in org-super-agenda-auto-selector-keywords
+                                                                         collect (substring (symbol-name type) 6)))
+                                                        nil nil org-ql-super-groups)
+                                  ("Global groups" org-super-agenda-groups)
+                                  ("Don't group" nil)
+                                  (property (list (list (intern (concat ":auto-" property))))))
+            org-ql-sort (pcase (completing-read "Sort by: "
+                                                (list "Don't sort"
+                                                      "date"
+                                                      "deadline"
+                                                      "priority"
+                                                      "scheduled"
+                                                      "todo")
+                                                nil nil org-ql-sort)
+                          ("Don't sort" nil)
+                          (sort (intern sort)))))
     (org-ql-agenda--agenda org-ql-buffers-files
       org-ql-query
       :sort org-ql-sort
