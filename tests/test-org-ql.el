@@ -29,6 +29,15 @@
 
 (require 'org-ql)
 
+;; NOTE: We load Helm for the tests, but these are not required by the
+;; package itself, so users are not required to have Helm installed.
+(require 'helm)
+(require 'helm-lib)
+(require 'helm-source)
+(require 'helm-org)
+
+(require 'helm-org-ql)
+
 ;;;; Variables
 
 ;;;; Functions
@@ -226,6 +235,37 @@ RESULTS should be a list of strings as returned by
                 :to-equal (list :query t
                                 :preamble (rx bol (>= 2 "*") " ")
                                 :preamble-case-fold t)))))
+
+  (describe "Helm query rewriting"
+
+    (it "Timestamp-based predicates"
+      (expect (helm-org-ql--input-to-query "scheduled:2017-07-07")
+              :to-equal '(and (scheduled :on "2017-07-07")))
+      (expect (helm-org-ql--input-to-query "deadline:2017-07-07--2017-07-09")
+              :to-equal '(and (deadline :from "2017-07-07" :to "2017-07-09")))
+      (expect (helm-org-ql--input-to-query "planning:2017-07-07--")
+              :to-equal '(and (planning :from "2017-07-07")))
+      (expect (helm-org-ql--input-to-query "closed:2017-07-07-")
+              :to-equal '(and (closed :from "2017-07-07")))
+      (expect (helm-org-ql--input-to-query "ts-active:--2017-07-07")
+              :to-equal '(and (ts-active :to "2017-07-07")))
+      (expect (helm-org-ql--input-to-query "ts-inactive:-2017-07-07")
+              :to-equal '(and (ts-inactive :to "2017-07-07")))
+      (expect (helm-org-ql--input-to-query "ts-a:-2017-07-07")
+              :to-equal '(and (ts-a :to "2017-07-07")))
+      (expect (helm-org-ql--input-to-query "ts-i:2017-07-07")
+              :to-equal '(and (ts-i :on "2017-07-07")))
+      (expect (helm-org-ql--input-to-query "ts:")
+              :to-equal '(and (ts)))
+      (expect (helm-org-ql--input-to-query "clocked:")
+              :to-equal '(and (clocked))))
+    (it "To-do predicates"
+      (expect (helm-org-ql--input-to-query "todo:")
+              :to-equal '(and (todo)))
+      (expect (helm-org-ql--input-to-query "todo:TODO")
+              :to-equal '(and (todo "TODO")))
+      (expect (helm-org-ql--input-to-query "todo:TODO|SOMEDAY")
+              :to-equal '(and (todo "TODO" "SOMEDAY")))))
 
   (describe "Query results"
 

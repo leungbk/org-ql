@@ -204,6 +204,85 @@ strings."
                        ;; have to type quotation marks around all strings.
                        ;; Not perfect, but should be more useful.
                        (pcase-exhaustive form
+                         ((and (pred atom)
+                               (let s (symbol-name form))
+                               (guard (string-match (rx (group (or "clocked" "closed" "planning" "deadline" "scheduled"
+                                                                   "ts" "ts-active" "ts-inactive" "ts-a" "ts-i"))
+                                                        ":" (group (0+ anything)))
+                                                    s))
+                               (let type (intern (match-string 1 s)))
+                               (let arg (match-string 2 s)))
+                          ;; Timestamp-based predicates.  NOTE: Times are not supported, only dates.
+                          (pcase arg
+                            ;; The `pcase' `rx let' form is so helpful here!
+                            ((rx bos eos)
+                             ;; No date.
+                             `(,type))
+                            ((rx bos (let on (repeat 4 digit) "-" (repeat 2 digit) "-" (repeat 2 digit)) eos)
+                             ;; One date: :on
+                             `(,type :on ,on))
+                            ((rx bos (let from (repeat 4 digit) "-" (repeat 2 digit) "-" (repeat 2 digit))
+                                 (repeat 1 2 "-") eos)
+                             ;; One date: :from
+                             `(,type :from ,from))
+                            ((rx bos (repeat 1 2 "-")
+                                 (let to (repeat 4 digit) "-" (repeat 2 digit) "-" (repeat 2 digit)) eos)
+                             ;; One date: :to
+                             `(,type :to ,to))
+                            ((rx (let from (repeat 4 digit) "-" (repeat 2 digit) "-" (repeat 2 digit))
+                                 "--"
+                                 (let to (repeat 4 digit) "-" (repeat 2 digit) "-" (repeat 2 digit))
+                                 eos)
+                             ;; Two dates: :from :to.
+                             `(,type :from ,from :to ,to))))
+
+                         ((and (pred atom)
+                               (let s (symbol-name form))
+                               (guard (string-match (rx "todo:" (group (0+ anything))) s))
+                               (let arg (match-string 1 s)))
+                          ;; To-do predicates.
+                          (pcase arg
+                            ;; The `pcase' `rx let' form is so helpful here!
+                            ((rx bos eos)
+                             ;; No keyword.
+                             `(todo))
+                            ((rx bos (1+ (not (in "|"))) eos)
+                             ;; One keyword.
+                             `(todo ,arg))
+                            ((rx "|")
+                             ;; Multiple keywords.
+                             `(todo ,@(s-split "|" arg)))))
+
+                         ((and (pred atom)
+                               (let s (symbol-name form))
+                               (guard (string-match (rx (group (or "done" "habit")) ":") s)))
+                          ;; Predicates that take no arguments.
+                          `(,(intern (match-string 1 s))))
+
+                         ((and (pred atom)
+                               (let s (symbol-name form))
+                               ;; FIXME: tags& shouldn't use "|" as a separator because it's AND not OR.
+                               (guard (string-match (rx (group (or "category" "heading" "path" "regexp"
+                                                                   "tags" "tags-all" "tags&"
+                                                                   "tags-inherited" "itags"
+                                                                   "tags-local" "ltags"
+                                                                   "todo"))
+                                                        ":" (group (0+ anything)))
+                                                    s))
+                               (let type (intern (match-string 1 s)))
+                               (let args (match-string 2 s)))
+                          ;; Predicates that take no or one-or-more same-type arguments.
+                          (pcase args
+                            ((rx bos eos)
+                             ;; No keyword.
+                             `(,type))
+                            ((rx bos (1+ (not (in ":"))) eos)
+                             ;; One keyword.
+                             `(,type ,args))
+                            ((rx ":")
+                             ;; Multiple keywords.
+                             `(,type ,@(s-split ":" args)))))
+
                          ((pred stringp) form)
                          (`(deadline auto) form)
                          ((or '> '>= '< '<= '=)
