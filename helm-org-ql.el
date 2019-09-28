@@ -93,7 +93,7 @@ Based on `helm-map'.")
 
 ;;;###autoload
 (cl-defun helm-org-ql (buffers-files
-                       &optional (no-and current-prefix-arg) (name "helm-org-ql"))
+                       &key (boolean 'and) (name "helm-org-ql"))
   "Display results in BUFFERS-FILES for an `org-ql' query using Helm.
 Interactively, search the current buffer.
 
@@ -102,11 +102,8 @@ appropriate, which makes it unnecessary to type quotation marks
 around words that are intended to be searched for as indepenent
 strings.
 
-Also, unless NO-AND is non-nil (interactively, with prefix), all
-query tokens are wrapped in an implied (and) form.  This is
-because a query must be a sexp, so when typing multiple clauses,
-either (and) or (or) would be required around them, and (and) is
-typically more useful, because it narrows down results.
+All query tokens are wrapped in the operator BOOLEAN (default
+`and'; with prefix, `or').
 
 For example, this raw input:
 
@@ -124,21 +121,23 @@ Is transformed into this query:
 
     (and \"something else\" (tags \"funny\"))"
   (interactive (list (current-buffer)))
-  (let ((helm-input-idle-delay helm-org-ql-input-idle-delay))
-    (helm :prompt (format "Query (boolean %s): " (if no-and
-                                                     "OR"
-                                                   "AND"))
+  (let ((boolean (if current-prefix-arg 'or boolean))
+        (helm-input-idle-delay helm-org-ql-input-idle-delay))
+    (helm :prompt (format "Query (boolean %s): " (-> boolean symbol-name upcase))
           :sources
           ;; Expansion of `helm-build-sync-source' macro.
           (helm-make-source name 'helm-source-sync
-            :candidates (lambda nil
-                          (let* ((query (helm-org-ql--input-to-query helm-pattern no-and))
-                                 (window-width (window-width (helm-window))))
-                            (when query
-                              (with-current-buffer (helm-buffer-get)
-                                (setq helm-org-ql-buffers-files buffers-files))
-                              (org-ql-select buffers-files query
-                                :action (list 'helm-org-ql--heading window-width)))))
+            :candidates #'(lambda nil
+                            (let* ((query (org-ql--input-query helm-pattern))
+                                   (window-width (window-width (helm-window))))
+                              (when query
+                                (setf query (cons boolean query))
+                                (with-current-buffer (helm-buffer-get)
+                                  (setq helm-org-ql-buffers-files buffers-files))
+                                (ignore-errors
+                                  ;; Ignore errors that might be caused by partially typed queries.
+                                  (org-ql-select buffers-files query
+                                    :action (list 'helm-org-ql--heading window-width))))))
             :match #'identity
             :fuzzy-match nil
             :multimatch nil
@@ -150,7 +149,7 @@ Is transformed into this query:
 (defun helm-org-ql-agenda-files ()
   "Search agenda files with `helm-org-ql', which see."
   (interactive)
-  (helm-org-ql (org-agenda-files) nil "helm-org-ql-agenda-files"))
+  (helm-org-ql (org-agenda-files) :name "helm-org-ql-agenda-files"))
 
 ;;;###autoload
 (defun helm-org-ql-org-directory ()
@@ -158,7 +157,7 @@ Is transformed into this query:
   (interactive)
   (helm-org-ql (directory-files org-directory 'full
                                 (rx ".org" eos))
-               nil "helm-org-ql-org-directory"))
+               :name "helm-org-ql-org-directory"))
 
 (defun helm-org-ql-show-marker (marker)
   "Show heading at MARKER."
@@ -187,120 +186,124 @@ Is transformed into this query:
 
 ;;;; Functions
 
-(defun helm-org-ql--input-to-query (input &optional no-and)
-  "Return `org-ql' query sexp for string INPUT.
-Unless NO-AND is non-nil (interactively, with prefix), all query
-tokens are wrapped in an implied (and) form, and plain
-symbols (except at the beginning of a sexp) are replaced with
-strings."
-  (unless (s-blank-str? input)
-    (setf input (format "(%s %s)" (if no-and "or" "and") input))
-    (when-let* ((query (ignore-errors
-                         ;; Ignore errors in case input is an
-                         ;; incomplete string or sexp.
-                         (read input))))
-      (cl-labels ((rec (form)
-                       ;; Replace some symbols with strings so users don't
-                       ;; have to type quotation marks around all strings.
-                       ;; Not perfect, but should be more useful.
-                       (pcase-exhaustive form
-                         ((and (pred atom)
-                               (let s (symbol-name form))
-                               (guard (string-match (rx (group (or "clocked" "closed" "planning" "deadline" "scheduled"
-                                                                   "ts" "ts-active" "ts-inactive" "ts-a" "ts-i"))
-                                                        ":" (group (0+ anything)))
-                                                    s))
-                               (let type (intern (match-string 1 s)))
-                               (let arg (match-string 2 s)))
-                          ;; Timestamp-based predicates.  NOTE: Times are not supported, only dates.
-                          (pcase arg
-                            ;; The `pcase' `rx let' form is so helpful here!
-                            ((rx bos eos)
-                             ;; No date.
-                             `(,type))
-                            ((rx bos (let on (repeat 4 digit) "-" (repeat 2 digit) "-" (repeat 2 digit)) eos)
-                             ;; One date: :on
-                             `(,type :on ,on))
-                            ((rx bos (let from (repeat 4 digit) "-" (repeat 2 digit) "-" (repeat 2 digit))
-                                 (repeat 1 2 "-") eos)
-                             ;; One date: :from
-                             `(,type :from ,from))
-                            ((rx bos (repeat 1 2 "-")
-                                 (let to (repeat 4 digit) "-" (repeat 2 digit) "-" (repeat 2 digit)) eos)
-                             ;; One date: :to
-                             `(,type :to ,to))
-                            ((rx (let from (repeat 4 digit) "-" (repeat 2 digit) "-" (repeat 2 digit))
-                                 "--"
-                                 (let to (repeat 4 digit) "-" (repeat 2 digit) "-" (repeat 2 digit))
-                                 eos)
-                             ;; Two dates: :from :to.
-                             `(,type :from ,from :to ,to))))
+;; NOTE: This function is superseded by the `peg' implementation in
+;; `org-ql--input-query', but I'm leaving it here for now.
+;; FIXME: Delete commented code before merging.
 
-                         ((and (pred atom)
-                               (let s (symbol-name form))
-                               (guard (string-match (rx "todo:" (group (0+ anything))) s))
-                               (let arg (match-string 1 s)))
-                          ;; To-do predicates.
-                          (pcase arg
-                            ;; The `pcase' `rx let' form is so helpful here!
-                            ((rx bos eos)
-                             ;; No keyword.
-                             `(todo))
-                            ((rx bos (1+ (not (in "|"))) eos)
-                             ;; One keyword.
-                             `(todo ,arg))
-                            ((rx "|")
-                             ;; Multiple keywords.
-                             `(todo ,@(s-split "|" arg)))))
-
-                         ((and (pred atom)
-                               (let s (symbol-name form))
-                               (guard (string-match (rx (group (or "done" "habit")) ":") s)))
-                          ;; Predicates that take no arguments.
-                          `(,(intern (match-string 1 s))))
-
-                         ((and (pred atom)
-                               (let s (symbol-name form))
-                               ;; FIXME: tags& shouldn't use "|" as a separator because it's AND not OR.
-                               (guard (string-match (rx (group (or "category" "heading" "path" "regexp"
-                                                                   "tags" "tags-all" "tags&"
-                                                                   "tags-inherited" "itags"
-                                                                   "tags-local" "ltags"
-                                                                   "todo"))
-                                                        ":" (group (0+ anything)))
-                                                    s))
-                               (let type (intern (match-string 1 s)))
-                               (let args (match-string 2 s)))
-                          ;; Predicates that take no or one-or-more same-type arguments.
-                          (pcase args
-                            ((rx bos eos)
-                             ;; No keyword.
-                             `(,type))
-                            ((rx bos (1+ (not (in ":"))) eos)
-                             ;; One keyword.
-                             `(,type ,args))
-                            ((rx ":")
-                             ;; Multiple keywords.
-                             `(,type ,@(s-split ":" args)))))
-
-                         ((pred stringp) form)
-                         (`(deadline auto) form)
-                         ((or '> '>= '< '<= '=)
-                          ;; Comparators, probably for (priority).
-                          form)
-                         ((guard (string-match (rx bos ":" (1+ anything) ":" eos)
-                                               (prin1-to-string form)))
-                          ;; An Org tag, not a Lisp keyword.
-                          (prin1-to-string form))
-                         ((pred keywordp) form)
-                         ((pred numberp) form)
-                         ((guard (string-prefix-p "!" (prin1-to-string form)))
-                          ;; Negation of a string.
-                          `(not ,(substring (prin1-to-string form) 1)))
-                         ((pred atom) (prin1-to-string form))
-                         ((pred listp) `(,(car form)
-                                         ,@(mapcar #'rec (cdr form)))))))
-        (rec query)))))
+;; (defun helm-org-ql--input-to-query (input &optional no-and)
+;;   "Return `org-ql' query sexp for string INPUT.
+;; Unless NO-AND is non-nil (interactively, with prefix), all query
+;; tokens are wrapped in an implied (and) form, and plain
+;; symbols (except at the beginning of a sexp) are replaced with
+;; strings."
+;;   (unless (s-blank-str? input)
+;;     (setf input (format "(%s %s)" (if no-and "or" "and") input))
+;;     (when-let* ((query (ignore-errors
+;;                          ;; Ignore errors in case input is an
+;;                          ;; incomplete string or sexp.
+;;                          (read input))))
+;;       (cl-labels ((rec (form)
+;;                        ;; Replace some symbols with strings so users don't
+;;                        ;; have to type quotation marks around all strings.
+;;                        ;; Not perfect, but should be more useful.
+;;                        (pcase-exhaustive form
+;;                          ((and (pred atom)
+;;                                (let s (symbol-name form))
+;;                                (guard (string-match (rx (group (or "clocked" "closed" "planning" "deadline" "scheduled"
+;;                                                                    "ts" "ts-active" "ts-inactive" "ts-a" "ts-i"))
+;;                                                         ":" (group (0+ anything)))
+;;                                                     s))
+;;                                (let type (intern (match-string 1 s)))
+;;                                (let arg (match-string 2 s)))
+;;                           ;; Timestamp-based predicates.  NOTE: Times are not supported, only dates.
+;;                           (pcase arg
+;;                             ;; The `pcase' `rx let' form is so helpful here!
+;;                             ((rx bos eos)
+;;                              ;; No date.
+;;                              `(,type))
+;;                             ((rx bos (let on (repeat 4 digit) "-" (repeat 2 digit) "-" (repeat 2 digit)) eos)
+;;                              ;; One date: :on
+;;                              `(,type :on ,on))
+;;                             ((rx bos (let from (repeat 4 digit) "-" (repeat 2 digit) "-" (repeat 2 digit))
+;;                                  (repeat 1 2 "-") eos)
+;;                              ;; One date: :from
+;;                              `(,type :from ,from))
+;;                             ((rx bos (repeat 1 2 "-")
+;;                                  (let to (repeat 4 digit) "-" (repeat 2 digit) "-" (repeat 2 digit)) eos)
+;;                              ;; One date: :to
+;;                              `(,type :to ,to))
+;;                             ((rx (let from (repeat 4 digit) "-" (repeat 2 digit) "-" (repeat 2 digit))
+;;                                  "--"
+;;                                  (let to (repeat 4 digit) "-" (repeat 2 digit) "-" (repeat 2 digit))
+;;                                  eos)
+;;                              ;; Two dates: :from :to.
+;;                              `(,type :from ,from :to ,to))))
+;;
+;;                          ((and (pred atom)
+;;                                (let s (symbol-name form))
+;;                                (guard (string-match (rx "todo:" (group (0+ anything))) s))
+;;                                (let arg (match-string 1 s)))
+;;                           ;; To-do predicates.
+;;                           (pcase arg
+;;                             ;; The `pcase' `rx let' form is so helpful here!
+;;                             ((rx bos eos)
+;;                              ;; No keyword.
+;;                              `(todo))
+;;                             ((rx bos (1+ (not (in "|"))) eos)
+;;                              ;; One keyword.
+;;                              `(todo ,arg))
+;;                             ((rx "|")
+;;                              ;; Multiple keywords.
+;;                              `(todo ,@(s-split "|" arg)))))
+;;
+;;                          ((and (pred atom)
+;;                                (let s (symbol-name form))
+;;                                (guard (string-match (rx (group (or "done" "habit")) ":") s)))
+;;                           ;; Predicates that take no arguments.
+;;                           `(,(intern (match-string 1 s))))
+;;
+;;                          ((and (pred atom)
+;;                                (let s (symbol-name form))
+;;                                ;; FIXME: tags& shouldn't use "|" as a separator because it's AND not OR.
+;;                                (guard (string-match (rx (group (or "category" "heading" "path" "regexp"
+;;                                                                    "tags" "tags-all" "tags&"
+;;                                                                    "tags-inherited" "itags"
+;;                                                                    "tags-local" "ltags"
+;;                                                                    "todo"))
+;;                                                         ":" (group (0+ anything)))
+;;                                                     s))
+;;                                (let type (intern (match-string 1 s)))
+;;                                (let args (match-string 2 s)))
+;;                           ;; Predicates that take no or one-or-more same-type arguments.
+;;                           (pcase args
+;;                             ((rx bos eos)
+;;                              ;; No keyword.
+;;                              `(,type))
+;;                             ((rx bos (1+ (not (in ":"))) eos)
+;;                              ;; One keyword.
+;;                              `(,type ,args))
+;;                             ((rx ":")
+;;                              ;; Multiple keywords.
+;;                              `(,type ,@(s-split ":" args)))))
+;;
+;;                          ((pred stringp) form)
+;;                          (`(deadline auto) form)
+;;                          ((or '> '>= '< '<= '=)
+;;                           ;; Comparators, probably for (priority).
+;;                           form)
+;;                          ((guard (string-match (rx bos ":" (1+ anything) ":" eos)
+;;                                                (prin1-to-string form)))
+;;                           ;; An Org tag, not a Lisp keyword.
+;;                           (prin1-to-string form))
+;;                          ((pred keywordp) form)
+;;                          ((pred numberp) form)
+;;                          ((guard (string-prefix-p "!" (prin1-to-string form)))
+;;                           ;; Negation of a string.
+;;                           `(not ,(substring (prin1-to-string form) 1)))
+;;                          ((pred atom) (prin1-to-string form))
+;;                          ((pred listp) `(,(car form)
+;;                                          ,@(mapcar #'rec (cdr form)))))))
+;;         (rec query)))))
 
 (defun helm-org-ql--heading (window-width)
   "Return string for Helm for heading at point.

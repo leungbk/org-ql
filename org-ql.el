@@ -3,7 +3,7 @@
 ;; Author: Adam Porter <adam@alphapapa.net>
 ;; Url: https://github.com/alphapapa/org-ql
 ;; Version: 0.3-pre
-;; Package-Requires: ((emacs "26.1") (dash "2.13") (org "9.0") (org-super-agenda "1.2-pre") (ov "1.0.6") (s "1.12.0") (ts "0.2-pre"))
+;; Package-Requires: ((emacs "26.1") (dash "2.13") (org "9.0") (org-super-agenda "1.2-pre") (ov "1.0.6") (peg "0.6") (s "1.12.0") (ts "0.2-pre"))
 ;; Keywords: hypermedia, outlines, Org, agenda
 
 ;;; Commentary:
@@ -1203,6 +1203,48 @@ A and B are Org headline elements."
              (< a-priority b-priority))
             (a-priority t)
             (b-priority nil)))))
+
+
+;;;; Plain query parsing
+
+;; This section implements parsing of "plain," non-Lisp queries using
+;; the `peg' library.
+
+;; TODO: Document plain query syntax.
+
+(require 'peg)
+
+;; Fix compiler warnings probably caused by `peg' not using lexical-binding.
+;; TODO: File bug report upstream.
+(defvar peg-errors nil)
+(defvar peg-stack nil)
+
+(defun org-ql--input-query (input)
+  "Return query parsed from INPUT."
+  (unless (s-blank-str? input)
+    (let* ((query (peg-parse-string
+                   ((query (+ (or (and predicate-with-args `(pred args -- (cons (intern pred) args)))
+                                  (and predicate-without-args `(pred -- (list (intern pred))))
+                                  (and plain-string `(s -- (list 'regexp s))))
+                              (opt (+ (syntax-class whitespace) (any)))))
+                    (plain-string (substring (+ (not (syntax-class whitespace)) (any))))
+                    (predicate-with-args (substring keyword) ":" args)
+                    (predicate-without-args (substring keyword) ":")
+                    ;; NOTE: These keywords must be kept in sync with defined predicates.
+                    ;; TODO: Add other predicates.
+                    (keyword (or "heading"
+                                 "tags" "tags&"
+                                 "itags" "tags-inherited" "tags-i"
+                                 "ltags" "tags-local" "tags-l"
+                                 "todo" "property"))
+                    (args (list (+ (and (or quoted-arg unquoted-arg) (opt separator)))))
+                    (quoted-arg "\"" (substring (+ (not (or separator "\"")) (any))) "\"")
+                    (unquoted-arg (substring (+ (not (or separator "\"" (syntax-class whitespace))) (any))))
+                    (separator (or "," "=" ":")))
+                   input 'noerror)))
+      ;; Discard the t that `peg-parse-string' always returns as the first
+      ;; element.  I don't know what it means, but we don't want it.
+      (cdr query))))
 
 ;;;; Footer
 
