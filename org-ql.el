@@ -115,18 +115,25 @@ This list should not contain any duplicates.")
 
 (cl-defmacro org-ql--defpred (name args docstring &rest body)
   "Define an `org-ql' selector predicate named `org-ql--predicate-NAME'.
-ARGS is a `cl-defun'-style argument list.  DOCSTRING is the
-function's docstring.  BODY is the body of the predicate.
+NAME may be a symbol or a list of symbols: if a list, the first
+is used as the name and the rest are aliases.  ARGS is a
+`cl-defun'-style argument list.  DOCSTRING is the function's
+docstring.  BODY is the body of the predicate.
 
 Predicates will be called with point on the beginning of an Org
 heading and should return non-nil if the heading's entry is a
 match."
   (declare (debug (symbolp listp stringp def-body))
            (indent defun))
-  (let ((fn-name (intern (concat "org-ql--predicate-" (symbol-name name))))
-        (pred-name (intern (symbol-name name))))
+  (let* ((aliases (when (listp name)
+                    (cdr name)))
+         (name (cl-etypecase name
+                 (list (car name))
+                 (atom name)))
+         (fn-name (intern (concat "org-ql--predicate-" (symbol-name name))))
+         (pred-name (intern (symbol-name name))))
     `(progn
-       (push (list :name ',pred-name :fn ',fn-name :docstring ,docstring :args ',args) org-ql-predicates)
+       (push (list :name ',pred-name :aliases ',aliases :fn ',fn-name :docstring ,docstring :args ',args) org-ql-predicates)
        (cl-defun ,fn-name ,args ,docstring ,@body))))
 
 ;;;###autoload
@@ -826,7 +833,7 @@ Tests both inherited and local tags."
                        (when (tags-p local)
                          (seq-intersection tags local))))))))
 
-(org-ql--defpred tags-inherited (&rest tags)
+(org-ql--defpred (tags-inherited tags-i itags) (&rest tags)
   "Return non-nil if current heading's inherited tags include one or more of TAGS (a list of strings).
 If TAGS is nil, return non-nil if heading has any inherited tags."
   (cl-macrolet ((tags-p (tags)
@@ -838,7 +845,7 @@ If TAGS is nil, return non-nil if heading has any inherited tags."
         (otherwise (when (tags-p inherited)
                      (seq-intersection tags inherited)))))))
 
-(org-ql--defpred tags-local (&rest tags)
+(org-ql--defpred (tags-local tags-l ltags) (&rest tags)
   "Return non-nil if current heading's local tags include one or more of TAGS (a list of strings).
 If TAGS is nil, return non-nil if heading has any local tags."
   (cl-macrolet ((tags-p (tags)
@@ -1219,32 +1226,55 @@ A and B are Org headline elements."
 (defvar peg-errors nil)
 (defvar peg-stack nil)
 
-(defun org-ql--input-query (input)
-  "Return query parsed from INPUT."
-  (unless (s-blank-str? input)
-    (let* ((query (peg-parse-string
-                   ((query (+ (or (and predicate-with-args `(pred args -- (cons (intern pred) args)))
-                                  (and predicate-without-args `(pred -- (list (intern pred))))
-                                  (and plain-string `(s -- (list 'regexp s))))
-                              (opt (+ (syntax-class whitespace) (any)))))
-                    (plain-string (substring (+ (not (syntax-class whitespace)) (any))))
-                    (predicate-with-args (substring keyword) ":" args)
-                    (predicate-without-args (substring keyword) ":")
-                    ;; NOTE: These keywords must be kept in sync with defined predicates.
-                    ;; TODO: Add other predicates.
-                    (keyword (or "heading"
-                                 "tags" "tags&"
-                                 "itags" "tags-inherited" "tags-i"
-                                 "ltags" "tags-local" "tags-l"
-                                 "todo" "property"))
-                    (args (list (+ (and (or quoted-arg unquoted-arg) (opt separator)))))
-                    (quoted-arg "\"" (substring (+ (not (or separator "\"")) (any))) "\"")
-                    (unquoted-arg (substring (+ (not (or separator "\"" (syntax-class whitespace))) (any))))
-                    (separator (or "," "=" ":")))
-                   input 'noerror)))
-      ;; Discard the t that `peg-parse-string' always returns as the first
-      ;; element.  I don't know what it means, but we don't want it.
-      (cdr query))))
+(cl-eval-when (compile load eval)
+  ;; `org-ql-predicates' and `org-ql-predicate-aliases' must be
+  ;; defined when `org-ql--def-input-query-fn' is called.
+  (defvar org-ql-predicates-extra-aliases
+    '(ts-active ts-a ts-inactive ts-i)
+    ;; These are only needed for `org-ql--def-input-query-fn', so I'm leaving this definition here.
+    ;; FIXME: Find a better way to do this.
+    "Predicate aliases that aren't set in their definitions.")
+
+  (defmacro org-ql--def-input-query-fn ()
+    "Define function `org-ql--input-query'.
+Builds the PEG expression using predicates defined in
+`org-ql-predicates'."
+    (let* ((predicates (--map (symbol-name (plist-get it :name))
+                              org-ql-predicates))
+           (aliases (->> org-ql-predicates
+                         (--map (plist-get it :aliases))
+                         (append org-ql-predicates-extra-aliases)
+                         -non-nil
+                         -flatten
+                         (-map #'symbol-name)))
+           (keywords (->> (append predicates aliases)
+                          -uniq
+                          ;; Sort the keywords longest-first to work around what seems to be an
+                          ;; obscure bug in `peg': when one keyword is a substring of another,
+                          ;; and the shorter one is listed first, the shorter one fails to match.
+                          (-sort (-on #'> #'length)))))
+      `(defun org-ql--input-query (input)
+         "Return query parsed from INPUT."
+         (unless (s-blank-str? input)
+           (let* ((query (peg-parse-string
+                          ((query (+ (or (and predicate-with-args `(pred args -- (cons (intern pred) args)))
+                                         (and predicate-without-args `(pred -- (list (intern pred))))
+                                         (and plain-string `(s -- (list 'regexp s))))
+                                     (opt (+ (syntax-class whitespace) (any)))))
+                           (plain-string (substring (+ (not (syntax-class whitespace)) (any))))
+                           (predicate-with-args (substring keyword) ":" args)
+                           (predicate-without-args (substring keyword) ":")
+                           (keyword (or ,@keywords))
+                           (args (list (+ (and (or quoted-arg unquoted-arg) (opt separator)))))
+                           (quoted-arg "\"" (substring (+ (not (or separator "\"")) (any))) "\"")
+                           (unquoted-arg (substring (+ (not (or separator "\"" (syntax-class whitespace))) (any))))
+                           (separator (or "," "=" ":")))
+                          input 'noerror)))
+             ;; Discard the t that `peg-parse-string' always returns as the first
+             ;; element.  I don't know what it means, but we don't want it.
+             (cdr query))))))
+
+  (org-ql--def-input-query-fn))
 
 ;;;; Footer
 
