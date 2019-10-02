@@ -1247,12 +1247,12 @@ Builds the PEG expression using predicates defined in
                          -non-nil
                          -flatten
                          (-map #'symbol-name)))
-           (keywords (->> (append predicates aliases)
-                          -uniq
-                          ;; Sort the keywords longest-first to work around what seems to be an
-                          ;; obscure bug in `peg': when one keyword is a substring of another,
-                          ;; and the shorter one is listed first, the shorter one fails to match.
-                          (-sort (-on #'> #'length)))))
+           (predicates (->> (append predicates aliases)
+                            -uniq
+                            ;; Sort the keywords longest-first to work around what seems to be an
+                            ;; obscure bug in `peg': when one keyword is a substring of another,
+                            ;; and the shorter one is listed first, the shorter one fails to match.
+                            (-sort (-on #'> #'length)))))
       `(defun org-ql--input-query (input)
          "Return query parsed from INPUT."
          (unless (s-blank-str? input)
@@ -1262,10 +1262,12 @@ Builds the PEG expression using predicates defined in
                                          (and plain-string `(s -- (list 'regexp s))))
                                      (opt (+ (syntax-class whitespace) (any)))))
                            (plain-string (substring (+ (not (syntax-class whitespace)) (any))))
-                           (predicate-with-args (substring keyword) ":" args)
-                           (predicate-without-args (substring keyword) ":")
-                           (keyword (or ,@keywords))
-                           (args (list (+ (and (or quoted-arg unquoted-arg) (opt separator)))))
+                           (predicate-with-args (substring predicate) ":" args)
+                           (predicate-without-args (substring predicate) ":")
+                           (predicate (or ,@predicates))
+                           (args (list (+ (and (or keyword-arg quoted-arg unquoted-arg) (opt separator)))))
+                           (keyword-arg (and unquoted-arg "=" (substring (or quoted-arg unquoted-arg))
+                                             `(keyword -- (intern (concat ":" keyword)))))
                            (quoted-arg "\"" (substring (+ (not (or separator "\"")) (any))) "\"")
                            (unquoted-arg (substring (+ (not (or separator "\"" (syntax-class whitespace))) (any))))
                            (separator (or "," "=" ":")))
