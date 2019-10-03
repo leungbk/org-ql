@@ -1101,11 +1101,13 @@ parseable by `parse-time-string' which may omit the time value."
   (org-ql--predicate-ts :from from :to to :regexp org-scheduled-time-regexp :match-group 1
                         :limit (line-end-position 2)))
 
-(org-ql--defpred ts (&key from to _on regexp (match-group 0) (limit (org-entry-end-position)))
-  ;; The underscore before `on' prevents "unused lexical variable" warnings,
-  ;; because we pre-process that argument in a macro before this function is
-  ;; called.  The `regexp' argument is also provided by the macro and is not
-  ;; to be given by the user, so it is omitted from the docstring.
+(org-ql--defpred (ts ts-active ts-a ts-inactive ts-i)
+  (&key from to _on regexp (match-group 0) (limit (org-entry-end-position)))
+  ;; NOTE: Arguments to this predicate are pre-processed in `org-ql--pre-process-query'.
+  ;; The underscore before `on' prevents "unused lexical variable" warnings due to the
+  ;; pre-processing converting that argument to FROM and TO.  The `regexp' argument is
+  ;; also provided by the pre-processing and is not to be given by the user.  FROM and
+  ;; TO are actually expected to be `ts' structs.  The docstring is written for users.
   "Return non-nil if current entry has a timestamp in given period.
 If no arguments are specified, return non-nil if entry has any
 timestamp.
@@ -1129,8 +1131,6 @@ the end of the entry, i.e. the position returned by
 bound to a different positiion, e.g. for planning lines, the end
 of the line after the heading."
   ;; TODO: DRY this with the clocked predicate.
-  ;; NOTE: FROM and TO are actually expected to be `ts' structs.  The docstring is written
-  ;; for end users, for which the arguments are pre-processed by `org-ql-select'.
   (cl-macrolet ((next-timestamp ()
                                 `(when (re-search-forward regexp limit t)
                                    (ts-parse-org (match-string match-group))))
@@ -1240,23 +1240,18 @@ A and B are Org headline elements."
 (defvar peg-stack nil)
 
 (cl-eval-when (compile load eval)
-  ;; `org-ql-predicates' and `org-ql-predicate-aliases' must be
-  ;; defined when `org-ql--def-plain-query-fn' is called.
-  (defvar org-ql-predicates-extra-aliases
-    '(ts-active ts-a ts-inactive ts-i)
-    ;; These are only needed for `org-ql--def-plain-query-fn', so I'm leaving this definition here.
-    ;; FIXME: Find a better way to do this.
-    "Predicate aliases that aren't set in their definitions.")
+  ;; This `eval-when' is necessary, otherwise the macro does not define
+  ;; the function correctly, apparently because `org-ql-predicates'
+  ;; ends up being not defined correctly at expansion time.
 
   (defmacro org-ql--def-plain-query-fn ()
     "Define function `org-ql--input-query'.
 Builds the PEG expression using predicates defined in
-`org-ql-predicates'."
+`org-ql-predicates' and `org-ql-predicates-extra-aliases'."
     (let* ((predicates (--map (symbol-name (plist-get it :name))
                               org-ql-predicates))
            (aliases (->> org-ql-predicates
                          (--map (plist-get it :aliases))
-                         (append org-ql-predicates-extra-aliases)
                          -non-nil
                          -flatten
                          (-map #'symbol-name)))
