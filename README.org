@@ -201,11 +201,31 @@ Show a sparse tree for ~QUERY~ in ~BUFFER~ and return number of results.  The tr
 
 ** Queries
 
-A query is a lisp form which may contain arbitrary lisp forms, as well as certain built-in predicates.  It is byte-compiled into a predicate function which is tested with point on each heading in an Org buffer; when it returns non-nil, the heading matches the query.
+An =org-ql= query is a lisp form which may contain arbitrary lisp forms, as well as certain built-in predicates.  It is byte-compiled into a predicate function which is tested with point on each heading in an Org buffer; when it returns non-nil, the heading matches the query.
 
 *Notes:*
 +  Bare strings like ~"string"~ are automatically converted to ~(regexp "string")~ predicates.
-+  Standard numeric comparator function symbols (~<~, ~<=~, ~>~, ~>=~, ~=~ ) need not be quoted when passed as an argument to these predicates.  The resemblance to infix notation is coincidental.  See examples in documentation.
++  Standard numeric comparator function symbols (~<~, ~<=~, ~>~, ~>=~, ~=~ ) need not be quoted when passed as an argument to predicates which accept them.  The resemblance to infix notation is coincidental.
+
+*** Non-sexp query syntax
+:PROPERTIES:
+:TOC:      ignore
+:END:
+
+The command =org-ql-search= also accepts, and the command =helm-org-ql= only accepts, an alternative, non-sexp query syntax.  The syntax is simple, and a few examples of queries in both syntaxes should suffice.  By default, when multiple predicates are used, they are combined with boolean =and=.
+
+| Sexp syntax                                     | Plain syntax                            |
+|-------------------------------------------------+-----------------------------------------|
+| ~(todo)~                                          | ~todo:~                                   |
+| ~(todo "SOMEDAY")~                                | ~todo:SOMEDAY~                            |
+| ~(todo "SOMEDAY" "WAITING")~                      | ~todo:SOMEDAY,WAITING~                    |
+| ~(ts :on today)~                                  | ~ts:on=today~                             |
+| ~(ts-active :from "2017-01-01" :to "2018-01-01")~ | ~ts-active:from=2017-01-01,to=2018-01-01~ |
+| ~(clocked :on -1)~                                | ~clocked:on=-1~                           |
+| ~(heading "quoted phrase" "word")~                | ~heading:"quoted phrase",word~            |
+| ~(and (tags "book" "books") (priority "A"))~      | ~tags:book,books priority:A~              |
+
+/Note: The =priority= predicate's support for comparator symbols is currently limited to the sexp syntax./
 
 *** Predicates
 :PROPERTIES:
@@ -470,6 +490,7 @@ Expands into a call to ~org-ql-select~ with the same arguments.  For convenience
 ** 0.3-pre
 
 *Added*
++  Alternative, non-sexp-based query syntax for commands =org-ql-search= and =helm-org-ql=.
 +  Command =helm-org-ql=.
 +  Command =org-ql-sparse-tree=, like =org-sparse-tree= for =org-ql= queries.  (Thanks to [[https://github.com/akirak][Akira Komamura]].)
 +  Command =org-ql-view-sidebar=.

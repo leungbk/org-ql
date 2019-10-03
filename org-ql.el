@@ -1230,8 +1230,6 @@ A and B are Org headline elements."
 ;; This section implements parsing of "plain," non-Lisp queries using
 ;; the `peg' library.
 
-;; TODO: Document plain query syntax.
-
 (require 'peg)
 
 ;; Fix compiler warnings probably caused by `peg' not using lexical-binding.
