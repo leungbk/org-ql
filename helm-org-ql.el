@@ -94,8 +94,9 @@ Based on `helm-map'.")
 ;;;###autoload
 (cl-defun helm-org-ql (buffers-files
                        &key (boolean 'and) (name "helm-org-ql"))
-  "Display results in BUFFERS-FILES for an `org-ql' query using Helm.
-Interactively, search the current buffer.
+  "Display results in BUFFERS-FILES for an `org-ql' non-sexp query using Helm.
+Interactively, search the current buffer.  Note that this command
+only accepts non-sexp, \"plain\" queries.
 
 NOTE: Atoms in the query are turned into strings where
 appropriate, which makes it unnecessary to type quotation marks

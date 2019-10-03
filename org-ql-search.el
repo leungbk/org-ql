@@ -83,7 +83,7 @@ Runs `org-occur-hook' after making the sparse tree."
 ;;;###autoload
 (cl-defun org-ql-search (buffers-files query &key narrow super-groups sort title
                                        (buffer org-ql-view-buffer))
-  "Search for QUERY-STRING with `org-ql'.
+  "Search for QUERY with `org-ql'.
 Interactively, prompt for these variables:
 
 BUFFERS-FILES: A list of buffers and/or files to search.
