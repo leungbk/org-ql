@@ -58,7 +58,6 @@ matches, which allows stacking calls to this command.
 
 Runs `org-occur-hook' after making the sparse tree."
   ;; Code based on `org-occur'.
-  ;; TODO: Use `helm-org-ql' plain-text query processing.
   (interactive (list (read-minibuffer "Query: ")
                      :keep-previous current-prefix-arg))
   (with-current-buffer buffer
