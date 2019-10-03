@@ -1266,11 +1266,11 @@ Builds the PEG expression using predicates defined in
                            (predicate-without-args (substring predicate) ":")
                            (predicate (or ,@predicates))
                            (args (list (+ (and (or keyword-arg quoted-arg unquoted-arg) (opt separator)))))
-                           (keyword-arg (and unquoted-arg "=" (substring (or quoted-arg unquoted-arg))
-                                             `(keyword -- (intern (concat ":" keyword)))))
+                           (keyword-arg (and keyword "=" `(kw -- (intern (concat ":" kw)))))
+                           (keyword (substring (+ (not (or separator "=" "\"" (syntax-class whitespace))) (any))))
                            (quoted-arg "\"" (substring (+ (not (or separator "\"")) (any))) "\"")
                            (unquoted-arg (substring (+ (not (or separator "\"" (syntax-class whitespace))) (any))))
-                           (separator (or "," "=" ":")))
+                           (separator "," ))
                           input 'noerror)))
              ;; Discard the t that `peg-parse-string' always returns as the first
              ;; element.  I don't know what it means, but we don't want it.
