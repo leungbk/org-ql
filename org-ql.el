@@ -1228,14 +1228,14 @@ A and B are Org headline elements."
 
 (cl-eval-when (compile load eval)
   ;; `org-ql-predicates' and `org-ql-predicate-aliases' must be
-  ;; defined when `org-ql--def-input-query-fn' is called.
+  ;; defined when `org-ql--def-plain-query-fn' is called.
   (defvar org-ql-predicates-extra-aliases
     '(ts-active ts-a ts-inactive ts-i)
-    ;; These are only needed for `org-ql--def-input-query-fn', so I'm leaving this definition here.
+    ;; These are only needed for `org-ql--def-plain-query-fn', so I'm leaving this definition here.
     ;; FIXME: Find a better way to do this.
     "Predicate aliases that aren't set in their definitions.")
 
-  (defmacro org-ql--def-input-query-fn ()
+  (defmacro org-ql--def-plain-query-fn ()
     "Define function `org-ql--input-query'.
 Builds the PEG expression using predicates defined in
 `org-ql-predicates'."
@@ -1253,8 +1253,8 @@ Builds the PEG expression using predicates defined in
                             ;; obscure bug in `peg': when one keyword is a substring of another,
                             ;; and the shorter one is listed first, the shorter one fails to match.
                             (-sort (-on #'> #'length)))))
-      `(defun org-ql--input-query (input)
-         "Return query parsed from INPUT."
+      `(defun org-ql--plain-query (input)
+         "Return query parsed from plain query string INPUT."
          (unless (s-blank-str? input)
            (let* ((query (peg-parse-string
                           ((query (+ (or (and predicate-with-args `(pred args -- (cons (intern pred) args)))
@@ -1276,7 +1276,7 @@ Builds the PEG expression using predicates defined in
              ;; element.  I don't know what it means, but we don't want it.
              (nreverse (cdr query)))))))
 
-  (org-ql--def-input-query-fn))
+  (org-ql--def-plain-query-fn))
 
 ;;;; Footer
 

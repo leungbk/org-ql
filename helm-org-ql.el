@@ -128,7 +128,7 @@ Is transformed into this query:
           ;; Expansion of `helm-build-sync-source' macro.
           (helm-make-source name 'helm-source-sync
             :candidates (lambda nil
-                          (let* ((query (org-ql--input-query helm-pattern))
+                          (let* ((query (org-ql--plain-query helm-pattern))
                                  (window-width (window-width (helm-window))))
                             (when query
                               (setf query (cons boolean query))
@@ -193,7 +193,7 @@ Is transformed into this query:
   (interactive)
   (let ((buffers-files (with-current-buffer (helm-buffer-get)
                          helm-org-ql-buffers-files))
-        (query (helm-org-ql--input-to-query helm-pattern)))
+        (query (org-ql--plain-query helm-pattern)))
     (helm-run-after-exit #'org-ql-search buffers-files query)))
 
 ;;;; Functions
