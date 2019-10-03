@@ -1274,7 +1274,7 @@ Builds the PEG expression using predicates defined in
                           input 'noerror)))
              ;; Discard the t that `peg-parse-string' always returns as the first
              ;; element.  I don't know what it means, but we don't want it.
-             (cdr query))))))
+             (nreverse (cdr query)))))))
 
   (org-ql--def-input-query-fn))
 
