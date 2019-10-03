@@ -1225,7 +1225,6 @@ A and B are Org headline elements."
             (a-priority t)
             (b-priority nil)))))
 
-
 ;;;; Plain query parsing
 
 ;; This section implements parsing of "plain," non-Lisp queries using
