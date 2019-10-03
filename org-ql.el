@@ -1267,8 +1267,9 @@ Builds the PEG expression using predicates defined in
                             ;; obscure bug in `peg': when one keyword is a substring of another,
                             ;; and the shorter one is listed first, the shorter one fails to match.
                             (-sort (-on #'> #'length)))))
-      `(defun org-ql--plain-query (input)
-         "Return query parsed from plain query string INPUT."
+      `(cl-defun org-ql--plain-query (input &optional (boolean 'and))
+         "Return query parsed from plain query string INPUT.
+Multiple predicates are combined with BOOLEAN."
          (unless (s-blank-str? input)
            (let* ((query (peg-parse-string
                           ((query (+ (or (and predicate-with-args `(pred args -- (cons (intern pred) args)))
@@ -1288,7 +1289,9 @@ Builds the PEG expression using predicates defined in
                           input 'noerror)))
              ;; Discard the t that `peg-parse-string' always returns as the first
              ;; element.  I don't know what it means, but we don't want it.
-             (nreverse (cdr query)))))))
+             (if (> (length (cdr query)) 1)
+                 (cons boolean (nreverse (cdr query)))
+               (cadr query)))))))
 
   (org-ql--def-plain-query-fn))
 
