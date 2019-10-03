@@ -365,22 +365,36 @@ predicates."
              to on))
      (when from
        (setq from (pcase from
-                    ((pred stringp) (ts-parse-fill 'begin from))
+                    ((or 'today "today") (->> (ts-now)
+                                              (ts-apply :hour 0 :minute 0 :second 0)))
                     ((pred numberp) (->> (ts-now)
                                          (ts-adjust 'day from)
                                          (ts-apply :hour 0 :minute 0 :second 0)))
-                    ((pred ts-p) from)
-                    ('today (->> (ts-now)
-                                 (ts-apply :hour 0 :minute 0 :second 0))))))
+                    ((and (pred stringp)
+                          (guard (ignore-errors (cl-parse-integer from))))
+                     ;; The `pcase' `let' pattern doesn't bind values in the
+                     ;; body forms, so we have to parse the integer again.
+                     (->> (ts-now)
+                          (ts-adjust 'day (cl-parse-integer from))
+                          (ts-apply :hour 0 :minute 0 :second 0)))
+                    ((pred stringp) (ts-parse-fill 'begin from))
+                    ((pred ts-p) from))))
      (when to
        (setq to (pcase to
-                  ((pred stringp) (ts-parse-fill 'end to))
+                  ((or 'today "today") (->> (ts-now)
+                                            (ts-apply :hour 23 :minute 59 :second 59)))
                   ((pred numberp) (->> (ts-now)
                                        (ts-adjust 'day to)
                                        (ts-apply :hour 23 :minute 59 :second 59)))
-                  ((pred ts-p) to)
-                  ('today (->> (ts-now)
-                               (ts-apply :hour 23 :minute 59 :second 59))))))))
+                  ((and (pred stringp)
+                        (guard (ignore-errors (cl-parse-integer to))))
+                   ;; The `pcase' `let' pattern doesn't bind values in the
+                   ;; body forms, so we have to parse the integer again.
+                   (->> (ts-now)
+                        (ts-adjust 'day (cl-parse-integer to))
+                        (ts-apply :hour 23 :minute 59 :second 59)))
+                  ((pred stringp) (ts-parse-fill 'end to))
+                  ((pred ts-p) to))))))
 
 (defun org-ql--query-predicate (query)
   "Return predicate function for QUERY."
