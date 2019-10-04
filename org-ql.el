@@ -331,11 +331,7 @@ Replaces bare strings with (regexp) selectors, and appropriate
                         `(,pred :to ,to)))
 
                      ;; Priorities
-                     (`(priority) ;; Match any defined priority by comparing to C.
-                      ;; Note that we quote the comparator again for consistency.
-                      `(priority '>= "C"))
-                     (`(priority ,_letter) element)
-                     (`(priority ,comparator ,letter)
+                     (`(priority ,(and (or '= '< '> '<= '>=) comparator) ,letter)
                       ;; Quote comparator.
                       `(priority ',comparator ,letter))
 
@@ -509,17 +505,12 @@ replace the clause with a preamble."
                                 ;; NOTE: This only accepts A, B, or C.  I haven't seen
                                 ;; other priorities in the wild, so this will do for now.
                                 (`(priority)
-                                 ;; Any priority.
-                                 (setq org-ql-preamble (rx-to-string `(seq bol (1+ "*") (1+ blank) "[#" (in "ABC") "]") t))
+                                 ;; Any priority cookie.
+                                 (setq org-ql-preamble (rx-to-string `(seq bol (1+ "*") (1+ blank) (0+ nonl) "[#" (in "ABC") "]") t))
                                  nil)
-                                (`(priority ,letter)
-                                 ;; Specific priority without comparator.
-                                 ;; MAYBE: Disable case-folding.
-                                 (setq org-ql-preamble (rx-to-string `(seq bol (1+ "*") (1+ blank)
-                                                                           (0+ nonl) (1+ blank)
-                                                                           "[#" ,letter "]") t))
-                                 nil)
-                                (`(priority ,comparator ,letter)
+                                (`(priority ,(and (or ''= ''< ''> ''<= ''>=) comparator) ,letter)
+                                 ;; Comparator and priority letter.
+                                 ;; NOTE: The double-quoted comparators.  See below.
                                  (let* ((priority-letters '("A" "B" "C"))
                                         (index (-elem-index letter priority-letters))
                                         ;; NOTE: Higher priority == lower number.
@@ -536,6 +527,13 @@ replace the clause with a preamble."
                                    (setq org-ql-preamble (rx-to-string `(seq bol (1+ "*") (1+ blank) (optional (1+ upper) (1+ blank))
                                                                              "[#" (in ,priorities) "]") t))
                                    nil))
+                                (`(priority . ,letters)
+                                 ;; One or more priorities.
+                                 ;; MAYBE: Disable case-folding.
+                                 (setq org-ql-preamble (rx-to-string `(seq bol (1+ "*") (1+ blank)
+                                                                           (optional (1+ upper) (1+ blank))
+                                                                           "[#" (or ,@letters) "]") t))
+                                 nil)
 
                                 ;; Properties.
                                 ;; MAYBE: Should case folding be disabled for properties?  What about values?
@@ -892,44 +890,46 @@ COMPARATOR may be `<', `<=', `>', or `>='."
       ((pred symbolp) ;; Compare with function
        (funcall level-or-comparator outline-level level)))))
 
-(org-ql--defpred priority (&optional comparator-or-priority priority)
+(org-ql--defpred priority (&rest args)
   "Return non-nil if current heading has a certain priority.
-COMPARATOR-OR-PRIORITY should be either a comparator function,
-like `<=', or a priority string, like \"A\" (in which case (`='
-will be the comparator).  If COMPARATOR-OR-PRIORITY is a
-comparator, PRIORITY should be a priority string.  If both
-arguments are nil, return non-nil if heading has any defined
-priority."
-  (let* (comparator)
-    (cond ((null priority)
-           ;; No comparator given: compare only given priority with =
-           (setq priority comparator-or-priority
-                 comparator '=))
-          (t
-           ;; Both comparator and priority given
-           (setq comparator comparator-or-priority)))
-    (setq comparator (cl-case comparator
-                       ;; Invert comparator because higher priority means lower number
-                       (< '>)
-                       (> '<)
-                       (<= '>=)
-                       (>= '<=)
-                       (= '=)
-                       (otherwise (user-error "Invalid comparator: %s" comparator))))
-    (setq priority (* 1000 (- org-lowest-priority (string-to-char priority))))
-    (when-let ((item-priority (save-excursion
-                                (save-match-data
-                                  ;; TODO: Is the save-match-data above necessary?
-                                  (when (and (looking-at org-heading-regexp)
-                                             (save-match-data
-                                               (string-match org-priority-regexp (match-string 0))))
-                                    ;; TODO: Items with no priority
-                                    ;; should not be the same as B
-                                    ;; priority.  That's not very
-                                    ;; useful IMO.  Better to do it
-                                    ;; like in org-super-agenda.
-                                    (org-get-priority (match-string 0)))))))
-      (funcall comparator priority item-priority))))
+ARGS may be either a list of one or more priority letters as
+strings, or a comparator function symbol followed by a priority
+letter string.  For example:
+
+  (priority \"A\")
+  (priority \"A\" \"B\")
+  (priority '>= \"B\")
+
+Note that items without a priority cookie never match this
+predicate (while Org itself considers items without a cookie to
+have the default priority, which, by default, is equal to
+priority B)."
+  ;; NOTE: This treats priorities differently than Org proper treats them, in that
+  ;; items without a priority cookie never match this predicate, even though Org
+  ;; itself would consider un-cookied items to have a default numeric priority
+  ;; value.  We do this because it doesn't seem very useful or intuitive for a
+  ;; query like (priority "B") to match an item that has no priority cookie.
+  ;; TODO: Convert priority arg(s) to numeric values in pre-processing.
+  (when-let* ((item-priority (save-excursion
+                               (save-match-data
+                                 ;; TODO: Is the save-match-data above necessary?
+                                 (when (and (looking-at org-heading-regexp)
+                                            (save-match-data
+                                              (string-match org-priority-regexp (match-string 0))))
+                                   (org-get-priority (match-string 0)))))))
+    ;; Item has a priority: compare it.
+    (pcase args
+      ('nil
+       ;; No arguments: return non-nil.
+       t)
+      (`(,(and (or '= '< '> '<= '>=) comparator) ,priority-arg)
+       ;; Comparator and priority arguments given: compare item priority using them.
+       (funcall comparator item-priority
+                (* 1000 (- org-lowest-priority (string-to-char priority-arg)))))
+      (_
+       ;; List of priorities given as arguments: compare each of them to item priority using =.
+       (cl-loop for priority-arg in args
+                thereis (= item-priority (* 1000 (- org-lowest-priority (string-to-char priority-arg)))))))))
 
 (org-ql--defpred habit ()
   "Return non-nil if entry is a habit."
