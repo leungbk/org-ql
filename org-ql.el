@@ -149,6 +149,8 @@ For convenience, arguments should be unquoted."
 
 ;;;; Functions
 
+;;;;; Query execution
+
 (define-hash-table-test 'org-ql-hash-test #'equal (lambda (args)
                                                     (sxhash-equal (prin1-to-string args))))
 
@@ -279,6 +281,183 @@ NARROW corresponds to the `org-ql-select' argument NARROW."
     :narrow narrow
     :sort order-by))
 
+(defun org-ql--select-cached (&rest args)
+  "Return results for ARGS and current buffer using cache."
+  ;; MAYBE: Timeout cached queries.  Probably not necessarily since they will be removed when a
+  ;; buffer is closed, or when a query is run after modifying a buffer.
+  (-let* (((&plist :query :preamble :action :narrow :preamble-case-fold) args)
+          (query-cache-key
+           ;; The key must include the preamble, because some queries are replaced by
+           ;; the preamble, leaving a nil query, which would make the key ambiguous.
+           (list :query query :preamble preamble :action action :preamble-case-fold preamble-case-fold
+                 (if narrow
+                     ;; Use bounds of narrowed portion of buffer.
+                     (cons (point-min) (point-max))
+                   nil))))
+    (if-let* ((buffer-cache (gethash (current-buffer) org-ql-cache))
+              (query-cache (cadr buffer-cache))
+              (modified-tick (car buffer-cache))
+              (buffer-unmodified-p (eq (buffer-modified-tick) modified-tick))
+              (cached-result (gethash query-cache-key query-cache)))
+        (pcase cached-result
+          ('org-ql-nil nil)
+          (_ cached-result))
+      (let ((new-result (apply #'org-ql--select args)))
+        (cond ((or (not query-cache)
+                   (not buffer-unmodified-p))
+               (puthash (current-buffer)
+                        (list (buffer-modified-tick)
+                              (let ((table (make-hash-table :test 'org-ql-hash-test)))
+                                (puthash query-cache-key (or new-result 'org-ql-nil) table)
+                                table))
+                        org-ql-cache))
+              (t (puthash query-cache-key (or new-result 'org-ql-nil) query-cache)))
+        new-result))))
+
+(cl-defun org-ql--select (&key preamble preamble-case-fold predicate action narrow
+                               &allow-other-keys)
+  "Return results of mapping function ACTION across entries in current buffer matching function PREDICATE.
+If NARROW is non-nil, buffer will not be widened."
+  ;; Since the mappings are stored in the variable `org-ql-predicates', macros like `flet'
+  ;; can't be used, so we do it manually (this is same as the equivalent `flet' expansion).
+  ;; Mappings are stored in the variable because it allows predicates to be defined with a
+  ;; macro, which allows documentation to be easily generated for them.
+
+  ;; MAYBE: Lift the `flet'-equivalent out of this function so it isn't done for each buffer.
+  (let (orig-fns)
+    (--each org-ql-predicates
+      ;; Save original function mappings.
+      (let ((name (plist-get it :name)))
+        (push (list :name name :fn (symbol-function name)) orig-fns)))
+    (unwind-protect
+        (progn
+          (--each org-ql-predicates
+            ;; Set predicate functions.
+            (fset (plist-get it :name) (plist-get it :fn)))
+          ;; Run query.
+          (save-excursion
+            (save-restriction
+              (unless narrow
+                (widen))
+              (goto-char (point-min))
+              (when (org-before-first-heading-p)
+                (outline-next-heading))
+              (if (not (org-at-heading-p))
+                  (progn
+                    ;; No headings in buffer: return nil.
+                    (unless (string-prefix-p " " (buffer-name))
+                      ;; Not a special, hidden buffer: show message, because if a user accidentally
+                      ;; searches a buffer without headings, he might be confused.
+                      (message "org-ql: No headings in buffer: %s" (current-buffer)))
+                    nil)
+                ;; Find matching entries.
+                (cond (preamble (let ((case-fold-search preamble-case-fold))
+                                  (cl-loop while (re-search-forward preamble nil t)
+                                           do (outline-back-to-heading 'invisible-ok)
+                                           when (funcall predicate)
+                                           collect (funcall action)
+                                           do (outline-next-heading))))
+                      (t (cl-loop when (funcall predicate)
+                                  collect (funcall action)
+                                  while (outline-next-heading))))))))
+      (--each orig-fns
+        ;; Restore original function mappings.
+        (fset (plist-get it :name) (plist-get it :fn))))))
+
+;;;;; Helpers
+
+(defun org-ql--tags-at (position)
+  "Return tags for POSITION in current buffer.
+Returns cons (INHERITED-TAGS . LOCAL-TAGS)."
+  ;; I'd like to use `-if-let*', but it doesn't leave non-nil variables
+  ;; bound in the else clause, so destructured variables that are non-nil,
+  ;; like found caches, are not available in the else clause.
+  (if-let* ((buffer-cache (gethash (current-buffer) org-ql-tags-cache))
+            (modified-tick (car buffer-cache))
+            (tags-cache (cdr buffer-cache))
+            (buffer-unmodified-p (eq (buffer-modified-tick) modified-tick))
+            (cached-result (gethash position tags-cache)))
+      ;; Found in cache: return them.
+      (pcase cached-result
+        ('org-ql-nil nil)
+        (_ cached-result))
+    ;; Not found in cache: get tags and cache them.
+    (let* ((local-tags (or (org-ql--get-tags position 'local)
+                           'org-ql-nil))
+           (inherited-tags (or (when org-use-tag-inheritance
+                                 (save-excursion
+                                   (when (org-up-heading-safe)
+                                     (-let* (((inherited local) (org-ql--tags-at (point)))
+                                             (tags (when (or inherited local)
+                                                     (cond ((and (listp inherited)
+                                                                 (listp local))
+                                                            (->> (append inherited local)
+                                                                 -non-nil -uniq))
+                                                           ((listp inherited) inherited)
+                                                           ((listp local) local)))))
+                                       (cl-typecase org-use-tag-inheritance
+                                         (list (setf tags (-intersection tags org-use-tag-inheritance)))
+                                         (string (setf tags (--select (string-match org-use-tag-inheritance it)
+                                                                      tags))))
+                                       (pcase org-tags-exclude-from-inheritance
+                                         ('nil tags)
+                                         (_ (-difference tags org-tags-exclude-from-inheritance)))))))
+                               'org-ql-nil))
+           (all-tags (list inherited-tags local-tags)))
+      ;; Check caches again, because they may have been set now.
+      ;; TODO: Is there a clever way we could avoid doing this, or is it inherently necessary?
+      (setf buffer-cache (gethash (current-buffer) org-ql-tags-cache)
+            modified-tick (car buffer-cache)
+            tags-cache (cdr buffer-cache)
+            buffer-unmodified-p (eq (buffer-modified-tick) modified-tick))
+      (unless (and buffer-cache buffer-unmodified-p)
+        ;; Buffer-local tags cache empty or invalid: make new one.
+        (setf tags-cache (make-hash-table))
+        (puthash (current-buffer)
+                 (cons (buffer-modified-tick) tags-cache)
+                 org-ql-tags-cache))
+      (puthash position all-tags tags-cache))))
+
+(defun org-ql--add-markers (element)
+  "Return ELEMENT with Org marker text properties added.
+ELEMENT should be an Org element like that returned by
+`org-element-headline-parser'.  This function should be called
+from within ELEMENT's buffer."
+  ;; NOTE: `org-agenda-new-marker' works, until it doesn't, because...I don't know.  It sometimes
+  ;; raises errors or returns markers that don't point into a buffer.  `copy-marker' always works,
+  ;; of course, but maybe it will leave "dangling" markers, which could affect performance over
+  ;; time?  I don't know, but for now, it seems that we have to use `copy-marker'.
+  (let* ((marker (copy-marker (org-element-property :begin element)))
+         (properties (--> (cadr element)
+                          (plist-put it :org-marker marker)
+                          (plist-put it :org-hd-marker marker))))
+    (setf (cadr element) properties)
+    element))
+
+;;;;; Query processing
+
+;; Processing, compiling, etc. for queries.
+
+;; This error is used for when compiling a query signals an error,
+;; making it easier for the UI to avoid spurious warnings, e.g. for
+;; partially typed queries in the Helm commands.
+(define-error 'org-ql-invalid-query "Invalid Org QL query" 'user-error)
+
+(defun org-ql--sanity-check-form (form)
+  "Signal error if any forms in FORM do not have preconditions met.
+Or, when possible, fix the problem."
+  (cl-flet ((check (symbol)
+                   (cl-case symbol
+                     ('done (unless org-done-keywords
+                              ;; NOTE: This check needs to be done from within the Org buffer being checked.
+                              (error "Variable `org-done-keywords' is nil.  Are you running this from an Org buffer?"))))))
+    (cl-loop for elem in form
+	     if (consp elem)
+	     do (progn
+		  (check (car elem))
+		  (org-ql--sanity-check-form (cdr elem)))
+	     else do (check elem))))
+
 (defun org-ql--pre-process-query (query)
   "Return QUERY having been pre-processed.
 Replaces bare strings with (regexp) selectors, and appropriate
@@ -348,77 +527,6 @@ Replaces bare strings with (regexp) selectors, and appropriate
                      ;; Any other form: passed through unchanged.
                      (_ element))))
     (rec query)))
-
-(defmacro org-ql--from-to-on ()
-  "For internal use.
-Expands into a form that processes arguments to timestamp-related
-predicates."
-  ;; Several attempts to use `cl-macrolet' and `cl-symbol-macrolet' failed, so I
-  ;; resorted to this top-level macro.  It will do for now.
-  `(progn
-     (when on
-       (setq from on
-             to on))
-     (when from
-       (setq from (pcase from
-                    ((or 'today "today") (->> (ts-now)
-                                              (ts-apply :hour 0 :minute 0 :second 0)))
-                    ((pred numberp) (->> (ts-now)
-                                         (ts-adjust 'day from)
-                                         (ts-apply :hour 0 :minute 0 :second 0)))
-                    ((and (pred stringp)
-                          (guard (ignore-errors (cl-parse-integer from))))
-                     ;; The `pcase' `let' pattern doesn't bind values in the
-                     ;; body forms, so we have to parse the integer again.
-                     (->> (ts-now)
-                          (ts-adjust 'day (cl-parse-integer from))
-                          (ts-apply :hour 0 :minute 0 :second 0)))
-                    ((pred stringp) (ts-parse-fill 'begin from))
-                    ((pred ts-p) from))))
-     (when to
-       (setq to (pcase to
-                  ((or 'today "today") (->> (ts-now)
-                                            (ts-apply :hour 23 :minute 59 :second 59)))
-                  ((pred numberp) (->> (ts-now)
-                                       (ts-adjust 'day to)
-                                       (ts-apply :hour 23 :minute 59 :second 59)))
-                  ((and (pred stringp)
-                        (guard (ignore-errors (cl-parse-integer to))))
-                   ;; The `pcase' `let' pattern doesn't bind values in the
-                   ;; body forms, so we have to parse the integer again.
-                   (->> (ts-now)
-                        (ts-adjust 'day (cl-parse-integer to))
-                        (ts-apply :hour 23 :minute 59 :second 59)))
-                  ((pred stringp) (ts-parse-fill 'end to))
-                  ((pred ts-p) to))))))
-
-(defun org-ql--query-predicate (query)
-  "Return predicate function for QUERY."
-  (byte-compile
-   `(lambda ()
-      (cl-macrolet ((clocked (&key from to on)
-                             (org-ql--from-to-on)
-                             `(org-ql--predicate-clocked :from ,from :to ,to))
-                    (closed (&key from to on)
-                            (org-ql--from-to-on)
-                            `(org-ql--predicate-closed :from ,from :to ,to))
-                    (deadline (&key from to on)
-                              (org-ql--from-to-on)
-                              `(org-ql--predicate-deadline :from ,from :to ,to))
-                    (planning (&key from to on)
-                              (org-ql--from-to-on)
-                              `(org-ql--predicate-planning :from ,from :to ,to))
-                    (scheduled (&key from to on)
-                               (org-ql--from-to-on)
-                               `(org-ql--predicate-scheduled :from ,from :to ,to))
-                    (ts (&key from to on (type 'both))
-                        (org-ql--from-to-on)
-                        `(org-ql--predicate-ts :from ,from :to ,to
-                                               :regexp ,(pcase type
-                                                          ('both org-tsr-regexp-both)
-                                                          ('active org-tsr-regexp)
-                                                          ('inactive org-ql-tsr-regexp-inactive)))))
-        ,query))))
 
 (defun org-ql--query-preamble (query)
   "Return plist (QUERY PREAMBLE PREAMBLE-CASE-FOLD) for QUERY.
@@ -594,173 +702,85 @@ replace the clause with a preamble."
                          (query (-flatten-n 1 query))))
            (list :query query :preamble org-ql-preamble :preamble-case-fold preamble-case-fold))))))
 
-(defun org-ql--select-cached (&rest args)
-  "Return results for ARGS and current buffer using cache."
-  ;; MAYBE: Timeout cached queries.  Probably not necessarily since they will be removed when a
-  ;; buffer is closed, or when a query is run after modifying a buffer.
-  (-let* (((&plist :query :preamble :action :narrow :preamble-case-fold) args)
-          (query-cache-key
-           ;; The key must include the preamble, because some queries are replaced by
-           ;; the preamble, leaving a nil query, which would make the key ambiguous.
-           (list :query query :preamble preamble :action action :preamble-case-fold preamble-case-fold
-                 (if narrow
-                     ;; Use bounds of narrowed portion of buffer.
-                     (cons (point-min) (point-max))
-                   nil))))
-    (if-let* ((buffer-cache (gethash (current-buffer) org-ql-cache))
-              (query-cache (cadr buffer-cache))
-              (modified-tick (car buffer-cache))
-              (buffer-unmodified-p (eq (buffer-modified-tick) modified-tick))
-              (cached-result (gethash query-cache-key query-cache)))
-        (pcase cached-result
-          ('org-ql-nil nil)
-          (_ cached-result))
-      (let ((new-result (apply #'org-ql--select args)))
-        (cond ((or (not query-cache)
-                   (not buffer-unmodified-p))
-               (puthash (current-buffer)
-                        (list (buffer-modified-tick)
-                              (let ((table (make-hash-table :test 'org-ql-hash-test)))
-                                (puthash query-cache-key (or new-result 'org-ql-nil) table)
-                                table))
-                        org-ql-cache))
-              (t (puthash query-cache-key (or new-result 'org-ql-nil) query-cache)))
-        new-result))))
+(defmacro org-ql--from-to-on ()
+  "For internal use.
+Expands into a form that processes arguments to timestamp-related
+predicates."
+  ;; Several attempts to use `cl-macrolet' and `cl-symbol-macrolet' failed, so I
+  ;; resorted to this top-level macro.  It will do for now.
+  `(progn
+     (when on
+       (setq from on
+             to on))
+     (when from
+       (setq from (pcase from
+                    ((or 'today "today") (->> (ts-now)
+                                              (ts-apply :hour 0 :minute 0 :second 0)))
+                    ((pred numberp) (->> (ts-now)
+                                         (ts-adjust 'day from)
+                                         (ts-apply :hour 0 :minute 0 :second 0)))
+                    ((and (pred stringp)
+                          (guard (ignore-errors (cl-parse-integer from))))
+                     ;; The `pcase' `let' pattern doesn't bind values in the
+                     ;; body forms, so we have to parse the integer again.
+                     (->> (ts-now)
+                          (ts-adjust 'day (cl-parse-integer from))
+                          (ts-apply :hour 0 :minute 0 :second 0)))
+                    ((pred stringp) (ts-parse-fill 'begin from))
+                    ((pred ts-p) from))))
+     (when to
+       (setq to (pcase to
+                  ((or 'today "today") (->> (ts-now)
+                                            (ts-apply :hour 23 :minute 59 :second 59)))
+                  ((pred numberp) (->> (ts-now)
+                                       (ts-adjust 'day to)
+                                       (ts-apply :hour 23 :minute 59 :second 59)))
+                  ((and (pred stringp)
+                        (guard (ignore-errors (cl-parse-integer to))))
+                   ;; The `pcase' `let' pattern doesn't bind values in the
+                   ;; body forms, so we have to parse the integer again.
+                   (->> (ts-now)
+                        (ts-adjust 'day (cl-parse-integer to))
+                        (ts-apply :hour 23 :minute 59 :second 59)))
+                  ((pred stringp) (ts-parse-fill 'end to))
+                  ((pred ts-p) to))))))
 
-(cl-defun org-ql--select (&key preamble preamble-case-fold predicate action narrow
-                               &allow-other-keys)
-  "Return results of mapping function ACTION across entries in current buffer matching function PREDICATE.
-If NARROW is non-nil, buffer will not be widened."
-  ;; Since the mappings are stored in the variable `org-ql-predicates', macros like `flet'
-  ;; can't be used, so we do it manually (this is same as the equivalent `flet' expansion).
-  ;; Mappings are stored in the variable because it allows predicates to be defined with a
-  ;; macro, which allows documentation to be easily generated for them.
+(defun org-ql--byte-compile-warning (_string _pos _fill level)
+  "Signal an `org-ql-invalid-query' error.
+Arguments STRING, POS, FILL, and LEVEL are according to
+`byte-compile-log-warning-function'."
+  ;; Used as the `byte-compile-log-warning-function' in `org-ql--query-preamble'.
+  (signal 'org-ql-invalid-query level))
 
-  ;; MAYBE: Lift the `flet'-equivalent out of this function so it isn't done for each buffer.
-  (let (orig-fns)
-    (--each org-ql-predicates
-      ;; Save original function mappings.
-      (let ((name (plist-get it :name)))
-        (push (list :name name :fn (symbol-function name)) orig-fns)))
-    (unwind-protect
-        (progn
-          (--each org-ql-predicates
-            ;; Set predicate functions.
-            (fset (plist-get it :name) (plist-get it :fn)))
-          ;; Run query.
-          (save-excursion
-            (save-restriction
-              (unless narrow
-                (widen))
-              (goto-char (point-min))
-              (when (org-before-first-heading-p)
-                (outline-next-heading))
-              (if (not (org-at-heading-p))
-                  (progn
-                    ;; No headings in buffer: return nil.
-                    (unless (string-prefix-p " " (buffer-name))
-                      ;; Not a special, hidden buffer: show message, because if a user accidentally
-                      ;; searches a buffer without headings, he might be confused.
-                      (message "org-ql: No headings in buffer: %s" (current-buffer)))
-                    nil)
-                ;; Find matching entries.
-                (cond (preamble (let ((case-fold-search preamble-case-fold))
-                                  (cl-loop while (re-search-forward preamble nil t)
-                                           do (outline-back-to-heading 'invisible-ok)
-                                           when (funcall predicate)
-                                           collect (funcall action)
-                                           do (outline-next-heading))))
-                      (t (cl-loop when (funcall predicate)
-                                  collect (funcall action)
-                                  while (outline-next-heading))))))))
-      (--each orig-fns
-        ;; Restore original function mappings.
-        (fset (plist-get it :name) (plist-get it :fn))))))
-
-(defun org-ql--tags-at (position)
-  "Return tags for POSITION in current buffer.
-Returns cons (INHERITED-TAGS . LOCAL-TAGS)."
-  ;; I'd like to use `-if-let*', but it doesn't leave non-nil variables
-  ;; bound in the else clause, so destructured variables that are non-nil,
-  ;; like found caches, are not available in the else clause.
-  (if-let* ((buffer-cache (gethash (current-buffer) org-ql-tags-cache))
-            (modified-tick (car buffer-cache))
-            (tags-cache (cdr buffer-cache))
-            (buffer-unmodified-p (eq (buffer-modified-tick) modified-tick))
-            (cached-result (gethash position tags-cache)))
-      ;; Found in cache: return them.
-      (pcase cached-result
-        ('org-ql-nil nil)
-        (_ cached-result))
-    ;; Not found in cache: get tags and cache them.
-    (let* ((local-tags (or (org-ql--get-tags position 'local)
-                           'org-ql-nil))
-           (inherited-tags (or (when org-use-tag-inheritance
-                                 (save-excursion
-                                   (when (org-up-heading-safe)
-                                     (-let* (((inherited local) (org-ql--tags-at (point)))
-                                             (tags (when (or inherited local)
-                                                     (cond ((and (listp inherited)
-                                                                 (listp local))
-                                                            (->> (append inherited local)
-                                                                 -non-nil -uniq))
-                                                           ((listp inherited) inherited)
-                                                           ((listp local) local)))))
-                                       (cl-typecase org-use-tag-inheritance
-                                         (list (setf tags (-intersection tags org-use-tag-inheritance)))
-                                         (string (setf tags (--select (string-match org-use-tag-inheritance it)
-                                                                      tags))))
-                                       (pcase org-tags-exclude-from-inheritance
-                                         ('nil tags)
-                                         (_ (-difference tags org-tags-exclude-from-inheritance)))))))
-                               'org-ql-nil))
-           (all-tags (list inherited-tags local-tags)))
-      ;; Check caches again, because they may have been set now.
-      ;; TODO: Is there a clever way we could avoid doing this, or is it inherently necessary?
-      (setf buffer-cache (gethash (current-buffer) org-ql-tags-cache)
-            modified-tick (car buffer-cache)
-            tags-cache (cdr buffer-cache)
-            buffer-unmodified-p (eq (buffer-modified-tick) modified-tick))
-      (unless (and buffer-cache buffer-unmodified-p)
-        ;; Buffer-local tags cache empty or invalid: make new one.
-        (setf tags-cache (make-hash-table))
-        (puthash (current-buffer)
-                 (cons (buffer-modified-tick) tags-cache)
-                 org-ql-tags-cache))
-      (puthash position all-tags tags-cache))))
-
-;;;;; Helpers
-
-(defun org-ql--add-markers (element)
-  "Return ELEMENT with Org marker text properties added.
-ELEMENT should be an Org element like that returned by
-`org-element-headline-parser'.  This function should be called
-from within ELEMENT's buffer."
-  ;; NOTE: `org-agenda-new-marker' works, until it doesn't, because...I don't know.  It sometimes
-  ;; raises errors or returns markers that don't point into a buffer.  `copy-marker' always works,
-  ;; of course, but maybe it will leave "dangling" markers, which could affect performance over
-  ;; time?  I don't know, but for now, it seems that we have to use `copy-marker'.
-  (let* ((marker (copy-marker (org-element-property :begin element)))
-         (properties (--> (cadr element)
-                          (plist-put it :org-marker marker)
-                          (plist-put it :org-hd-marker marker))))
-    (setf (cadr element) properties)
-    element))
-
-(defun org-ql--sanity-check-form (form)
-  "Signal error if any forms in FORM do not have preconditions met.
-Or, when possible, fix the problem."
-  (cl-flet ((check (symbol)
-                   (cl-case symbol
-                     ('done (unless org-done-keywords
-                              ;; NOTE: This check needs to be done from within the Org buffer being checked.
-                              (error "Variable `org-done-keywords' is nil.  Are you running this from an Org buffer?"))))))
-    (cl-loop for elem in form
-	     if (consp elem)
-	     do (progn
-		  (check (car elem))
-		  (org-ql--sanity-check-form (cdr elem)))
-	     else do (check elem))))
+(defun org-ql--query-predicate (query)
+  "Return predicate function for QUERY."
+  ;; Use custom log function to prevent warnings for e.g. partially typed queries.
+  (let ((byte-compile-log-warning-function #'org-ql--byte-compile-warning))
+    (byte-compile
+     `(lambda ()
+        (cl-macrolet ((clocked (&key from to on)
+                               (org-ql--from-to-on)
+                               `(org-ql--predicate-clocked :from ,from :to ,to))
+                      (closed (&key from to on)
+                              (org-ql--from-to-on)
+                              `(org-ql--predicate-closed :from ,from :to ,to))
+                      (deadline (&key from to on)
+                                (org-ql--from-to-on)
+                                `(org-ql--predicate-deadline :from ,from :to ,to))
+                      (planning (&key from to on)
+                                (org-ql--from-to-on)
+                                `(org-ql--predicate-planning :from ,from :to ,to))
+                      (scheduled (&key from to on)
+                                 (org-ql--from-to-on)
+                                 `(org-ql--predicate-scheduled :from ,from :to ,to))
+                      (ts (&key from to on (type 'both))
+                          (org-ql--from-to-on)
+                          `(org-ql--predicate-ts :from ,from :to ,to
+                                                 :regexp ,(pcase type
+                                                            ('both org-tsr-regexp-both)
+                                                            ('active org-tsr-regexp)
+                                                            ('inactive org-ql-tsr-regexp-inactive)))))
+          ,query)))))
 
 ;;;;; Predicates
 
@@ -830,7 +850,8 @@ With KEYWORDS, return non-nil if its keyword is one of KEYWORDS (a list of strin
   ;; NOTE: This was a defsubst before being defined with the macro.  Might be good to make it a defsubst again.
   (or (apply #'org-ql--predicate-todo org-done-keywords)))
 
-(org-ql--defpred tags (&rest tags)
+(org-ql--defpred (tags tags-all tags&) (&rest tags)
+  ;; NOTE: tags-all and tags& are "virtual" predicates that are handled by query pre-processing.
   "Return non-nil if current heading has one or more of TAGS (a list of strings).
 Tests both inherited and local tags."
   (cl-macrolet ((tags-p (tags)
@@ -1225,10 +1246,10 @@ A and B are Org headline elements."
             (a-priority t)
             (b-priority nil)))))
 
-;;;; Plain query parsing
+;;;;; Plain query parsing
 
-;; This section implements parsing of "plain," non-Lisp queries using
-;; the `peg' library.
+;; This section implements parsing of "plain," non-Lisp queries using the `peg'
+;; library.  NOTE: This needs to appear after the predicates are defined.
 
 (require 'peg)
 
