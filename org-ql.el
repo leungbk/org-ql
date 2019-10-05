@@ -514,6 +514,15 @@ Replaces bare strings with (regexp) selectors, and appropriate
                       ;; Quote comparator.
                       `(priority ',comparator ,letter))
 
+                     ;; Properties.
+                     (`(property ,property . ,value)
+                      ;; Convert keyword property arguments to strings.  Non-sexp
+                      ;; queries result in keyword property arguments (because to do
+                      ;; otherwise would require ugly special-casing in the parsing).
+                      (when (keywordp property)
+                        (setf property (substring (symbol-name property) 1)))
+                      (cons 'property (cons property value)))
+
                      ;; Tags.
                      (`(,(or 'tags-all 'tags&) . ,tags) `(and ,@(--map `(tags ,it) tags)))
                      ;; MAYBE: -all versions for inherited and local.
