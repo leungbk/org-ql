@@ -556,6 +556,14 @@ Replaces bare strings with (regexp) selectors, and appropriate
                                      (ts-apply :hour 23 :minute 59 :second 59))))
                         `(,pred :to ,to)))
 
+                     ;; Outline paths.
+                     (`(,(or 'outline-path 'olp) . ,strings)
+                      ;; Regexp quote headings.
+                      `(outline-path ,@(mapcar #'regexp-quote strings)))
+                     (`(,(or 'outline-path-segment 'olps) . ,strings)
+                      ;; Regexp quote headings.
+                      `(outline-path-segment ,@(mapcar #'regexp-quote strings)))
+
                      ;; Priorities
                      (`(priority ,(and (or '= '< '> '<= '>=) comparator) ,letter)
                       ;; Quote comparator.
@@ -921,6 +929,46 @@ Tests both inherited and local tags."
                          (seq-intersection tags inherited))
                        (when (tags-p local)
                          (seq-intersection tags local))))))))
+
+;; MAYBE: Preambles for outline-path predicates.  Not sure if possible without complicated logic.
+
+(org-ql--defpred (outline-path olp) (&rest regexps)
+  "Return non-nil if current node's outline path matches all of REGEXPS.
+Each string is compared as a regexp to each element of the node's
+outline path with `string-match'.  For example, if an entry's
+outline path were \"Food/Fruits/Grapes\", it would match any of
+the following queries:
+
+  (olp \"Food\")
+  (olp \"Fruits\")
+  (olp \"Food\" \"Fruits\")
+  (olp \"Fruits\" \"Grapes\")
+  (olp \"Food\" \"Grapes\")"
+  (let ((entry-olp (org-ql--get-at (point) (lambda ()
+                                             (org-get-outline-path 'with-self)))))
+    (cl-loop for h in regexps
+             always (cl-member h entry-olp :test #'string-match))))
+
+(org-ql--defpred (outline-path-segment olps) (&rest regexps)
+  "Return non-nil if current node's outline path matches segment REGEXPS.
+Matches REGEXPS as a contiguous segment of the outline path.
+Each regexp is compared to each element of the node's outline
+path with `string-match'.  For example, if an entry's outline
+path were \"Food/Fruits/Grapes\", it would match any of the
+following queries:
+
+  (olp \"Food\")
+  (olp \"Fruit\")
+  (olp \"Food\" \"Fruit\")
+  (olp \"Fruit\" \"Grape\")
+
+But it would not match the following, because they do not match a
+contiguous segment of the outline path:
+
+  (olp \"Food\" \"Grape\")"
+  ;; MAYBE: Allow anchored matching.
+  (org-ql--infix-p regexps (org-ql--get-at (point) (lambda ()
+                                                     (org-get-outline-path 'with-self)))))
 
 (org-ql--defpred (tags-inherited tags-i itags) (&rest tags)
   "Return non-nil if current heading's inherited tags include one or more of TAGS (a list of strings).
@@ -1301,6 +1349,18 @@ A and B are Org headline elements."
              (< a-priority b-priority))
             (a-priority t)
             (b-priority nil)))))
+
+(defun org-ql--infix-p (infix list)
+  "Return non-nil if INFIX is an infix of LIST.
+Each element of INFIX is compared using `string-match', so each
+element should be a regexp string."
+  (cl-loop with infix-length = (length infix)
+           while (and list
+                      (>= (length list) infix-length))
+           thereis (cl-loop for i in infix
+                            for l in list
+                            always (string-match i l))
+           do (pop list)))
 
 ;;;;; Plain query parsing
 
